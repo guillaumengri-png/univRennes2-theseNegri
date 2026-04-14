@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parcours biographiques — Outil de visualisation</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, -apple-system, Arial, sans-serif; font-size: 13px; background: #f5f5f5; }
+input, select {
+  background: white; color: #1F2937;
+  border: 1px solid #D1D5DB; border-radius: 5px;
+  padding: 4px 7px; font-size: 11px; width: 100%;
+  font-family: inherit;
+}
+input:focus, select:focus { outline: 2px solid #378ADD55; border-color: #378ADD; }
+details > summary { list-style: none; cursor: pointer; }
+details > summary::-webkit-details-marker { display: none; }
+button { font-family: inherit; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="root" style="display:flex;height:100vh;overflow:hidden;"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script>
+const { useState, useRef, createElement: h } = React;
+
+// ─── Données métier ───────────────────────────────────────────────────────────
+
+const TRAJ_TYPES = ["scolaire","professionnelle","résidentielle","administrative","relationnelle"];
+
+const TRAJ_SHORT = {
+  scolaire: "Scol.", professionnelle: "Pro.", résidentielle: "Résid.",
+  administrative: "Admin.", relationnelle: "Relat."
+};
+const TRAJ_FULL = {
+  scolaire: "Trajectoire scolaire", professionnelle: "Trajectoire professionnelle",
+  résidentielle: "Trajectoire résidentielle", administrative: "Trajectoire administrative",
+  relationnelle: "Trajectoire relationnelle"
+};
+
+const STATUTS = {
+  scolaire: ["Scolarisé·e","Interrompu","Reprend études","Formation professionnelle","Université / Supérieur","Non scolarisé·e"],
+  professionnelle: ["Sans emploi","Emploi stable","Emploi précaire","Bénévolat / Stage","Commerce / informel","Apprentissage"],
+  résidentielle: ["Famille (pays origine)","En transit","CADA / CHRS / DAHI","Hébergé·e (tiers)","115 / Urgence / Rue","Logement autonome","Colocation"],
+  administrative: ["Hors territoire","Sans statut","Demandeur·euse d'asile","Débouté·e","Procédure Dublin","Prot. subsidiaire","Réfugié·e statutaire","TS étudiant·e","TS travailleur·euse","Citoyen·ne / naturalisé·e"],
+  relationnelle: ["Famille (pays origine)","Famille séparée","En couple","Parent","Seul·e","Réseau social local"]
+};
+
+const COULEURS = {
+  scolaire: {
+    "Scolarisé·e": "#378ADD", "Interrompu": "#EF9F27", "Reprend études": "#1D9E75",
+    "Formation professionnelle": "#7F77DD", "Université / Supérieur": "#185FA5", "Non scolarisé·e": "#888780"
+  },
+  professionnelle: {
+    "Sans emploi": "#888780", "Emploi stable": "#185FA5", "Emploi précaire": "#378ADD",
+    "Bénévolat / Stage": "#5DCAA5", "Commerce / informel": "#EF9F27", "Apprentissage": "#1D9E75"
+  },
+  résidentielle: {
+    "Famille (pays origine)": "#1D9E75", "En transit": "#EF9F27", "CADA / CHRS / DAHI": "#378ADD",
+    "Hébergé·e (tiers)": "#85B7EB", "115 / Urgence / Rue": "#D85A30",
+    "Logement autonome": "#185FA5", "Colocation": "#7F77DD"
+  },
+  administrative: {
+    "Hors territoire": "#D3D1C7", "Sans statut": "#D85A30", "Demandeur·euse d'asile": "#EF9F27",
+    "Débouté·e": "#E24B4A", "Procédure Dublin": "#F0997B", "Prot. subsidiaire": "#85B7EB",
+    "Réfugié·e statutaire": "#378ADD", "TS étudiant·e": "#7F77DD",
+    "TS travailleur·euse": "#1D9E75", "Citoyen·ne / naturalisé·e": "#185FA5"
+  },
+  relationnelle: {
+    "Famille (pays origine)": "#1D9E75", "Famille séparée": "#888780", "En couple": "#7F77DD",
+    "Parent": "#EF9F27", "Seul·e": "#F0997B", "Réseau social local": "#5DCAA5"
+  }
+};
+
+const TYPES_EVT = [
+  "Migration / Départ","Événement admin.","Événement scolaire",
+  "Événement relationnel","Événement professionnel","Moment clé"
+];
+const COULEURS_EVT = {
+  "Migration / Départ": "#D85A30", "Événement admin.": "#EF9F27",
+  "Événement scolaire": "#378ADD", "Événement relationnel": "#7F77DD",
+  "Événement professionnel": "#1D9E75", "Moment clé": "#444441"
+};
+
+// ─── Layout SVG ───────────────────────────────────────────────────────────────
+
+const SVG_W = 900, PAD_L = 80, PAD_R = 48, PAD_T = 88;
+const LANE_H = 32, LANE_G = 3, EVT_H = 100, TIP = 36;
+const ARROW_H = TRAJ_TYPES.length * (LANE_H + LANE_G) - LANE_G;
+const SVG_H = PAD_T + ARROW_H + EVT_H + 12;
+
+function a2x(age, ageMax) {
+  return PAD_L + (age / Math.max(ageMax, 1)) * (SVG_W - PAD_L - PAD_R - TIP);
+}
+
+// ─── Composant visualisation ──────────────────────────────────────────────────
+
+function VizSVG({ subject, svgRef }) {
+  const { name, pays_origine, age_depart, age_entretien, ville,
+          trajectoires, evenements = [], phases = [] } = subject;
+
+  const ageMax = Math.max((age_entretien || 25) + 2, 2);
+  const arrowTop = PAD_T, arrowBot = arrowTop + ARROW_H;
+  const arrowMid = (arrowTop + arrowBot) / 2;
+  const tipX = SVG_W - PAD_R, bodyX = tipX - TIP;
+  const ap = `M${PAD_L},${arrowTop} L${bodyX},${arrowTop} L${tipX},${arrowMid} L${bodyX},${arrowBot} L${PAD_L},${arrowBot}Z`;
+
+  const tickSet = new Set([0, age_depart, age_entretien].filter(a => a != null && a >= 0));
+  for (let a = 2; a <= ageMax + 1; a += 2) tickSet.add(a);
+  const ticks = [...tickSet].filter(a => a <= ageMax).sort((a, b) => a - b);
+
+  const title = [name, pays_origine, age_entretien && `${age_entretien} ans`, ville]
+    .filter(Boolean).join(" · ");
+
+  return h("svg", {
+    ref: svgRef, width: SVG_W, height: SVG_H,
+    xmlns: "http://www.w3.org/2000/svg",
+    style: { fontFamily: "Arial, Helvetica, sans-serif", background: "white", display: "block" }
+  },
+    h("defs", null, h("clipPath", { id: "ac" }, h("path", { d: ap }))),
+
+    // Titre
+    h("text", { x: PAD_L, y: 16, fontSize: 11, fontWeight: "bold", fill: "#1F2937" }, title),
+
+    // Phases
+    ...phases.map(p => {
+      const x1 = a2x(p.age_debut, ageMax);
+      const x2 = Math.min(a2x(p.age_fin, ageMax), bodyX);
+      const mx = (x1 + x2) / 2;
+      return h("g", { key: p.id },
+        h("text", { x: mx, y: 32, fontSize: 9, textAnchor: "middle", fill: "#6B7280", fontStyle: "italic" }, `${p.label}`),
+        h("line", { x1, y1: 36, x2, y2: 36, stroke: "#9CA3AF", strokeWidth: 0.7, strokeDasharray: "3,2" }),
+        h("line", { x1, y1: 32, x2: x1, y2: 40, stroke: "#9CA3AF", strokeWidth: 0.7 }),
+        h("line", { x1: x2, y1: 32, x2, y2: 40, stroke: "#9CA3AF", strokeWidth: 0.7 })
+      );
+    }),
+
+    // Axe des âges
+    h("line", { x1: PAD_L, y1: PAD_T - 10, x2: bodyX, y2: PAD_T - 10, stroke: "#D1D5DB", strokeWidth: 0.6 }),
+    ...ticks.map(age => {
+      const x = a2x(age, ageMax);
+      const isKey = age === age_depart || age === age_entretien;
+      return h("g", { key: age },
+        h("line", { x1: x, y1: PAD_T - 14, x2: x, y2: PAD_T - 6, stroke: isKey ? "#D85A30" : "#9CA3AF", strokeWidth: isKey ? 1.5 : 0.8 }),
+        h("text", { x, y: PAD_T - 17, fontSize: 8.5, textAnchor: "middle", fill: isKey ? "#D85A30" : "#6B7280", fontWeight: isKey ? "bold" : "normal" }, `${age} ans`)
+      );
+    }),
+
+    // Fond de flèche
+    h("path", { d: ap, fill: "#F9FAFB", stroke: "#D1D5DB", strokeWidth: 1 }),
+
+    // Ligne de départ
+    age_depart > 0 && h("line", {
+      x1: a2x(age_depart, ageMax), y1: arrowTop,
+      x2: a2x(age_depart, ageMax), y2: arrowBot,
+      stroke: "#D85A30", strokeWidth: 1.5, strokeDasharray: "5,3", opacity: 0.5
+    }),
+
+    // Bandes de trajectoires
+    ...TRAJ_TYPES.map((traj, li) => {
+      const laneY = arrowTop + li * (LANE_H + LANE_G);
+      const segs = trajectoires[traj] || [];
+      return h("g", { key: traj },
+        li > 0 && h("line", { x1: PAD_L, y1: laneY, x2: bodyX, y2: laneY, stroke: "#E5E7EB", strokeWidth: 0.5 }),
+        h("text", { x: PAD_L - 5, y: laneY + LANE_H / 2 + 4, fontSize: 8, textAnchor: "end", fill: "#4B5563", fontWeight: "bold" }, TRAJ_SHORT[traj]),
+        ...segs.map(seg => {
+          const x1 = a2x(seg.age_debut, ageMax), x2 = a2x(seg.age_fin, ageMax);
+          const w = Math.max(x2 - x1, 2);
+          const col = COULEURS[traj]?.[seg.statut] || "#CBD5E1";
+          const lbl = seg.label || seg.statut || "";
+          return h("g", { key: seg.id, clipPath: "url(#ac)" },
+            h("rect", { x: x1, y: laneY + 1, width: w, height: LANE_H - 2, fill: col, rx: 2, opacity: 0.9 }),
+            w > 48 && h("text", {
+              x: x1 + w / 2, y: laneY + LANE_H / 2 + 3.5,
+              fontSize: 7.5, textAnchor: "middle", fill: "white", fontWeight: "bold"
+            }, lbl.length > 22 ? lbl.slice(0, 20) + "…" : lbl)
+          );
+        })
+      );
+    }),
+
+    // Contour de la flèche (par-dessus les segments)
+    h("path", { d: ap, fill: "none", stroke: "#6B7280", strokeWidth: 1.5 }),
+
+    // Événements
+    ...evenements.map((evt, i) => {
+      const x = a2x(evt.age, ageMax), col = COULEURS_EVT[evt.type] || "#374151";
+      const y = arrowBot + 14 + (i % 3) * 30;
+      const lbl = evt.label.length > 20 ? evt.label.slice(0, 19) + "…" : evt.label;
+      return h("g", { key: evt.id },
+        h("line", { x1: x, y1: arrowBot, x2: x, y2: y, stroke: col, strokeWidth: 0.8, strokeDasharray: "2,2", opacity: 0.6 }),
+        h("polygon", { points: `${x-4},${arrowBot+2} ${x+4},${arrowBot+2} ${x},${arrowBot-5}`, fill: col }),
+        h("rect", { x: x - 40, y, width: 80, height: 14, rx: 3, fill: col, opacity: 0.92 }),
+        h("text", { x, y: y + 10, fontSize: 7.5, textAnchor: "middle", fill: "white", fontWeight: "bold" }, lbl)
+      );
+    })
+  );
+}
+
+// ─── Exemple préchargé (Maria) ────────────────────────────────────────────────
+
+const EXAMPLE = {
+  name: "Maria", pays_origine: "Angola", age_depart: 18, age_entretien: 19, ville: "Rennes",
+  trajectoires: {
+    scolaire: [
+      { id: 1, age_debut: 7, age_fin: 14, statut: "Scolarisé·e", label: "École (Angola)" },
+      { id: 2, age_debut: 18, age_fin: 19, statut: "Reprend études", label: "Cours de français" }
+    ],
+    professionnelle: [],
+    résidentielle: [
+      { id: 1, age_debut: 0, age_fin: 18, statut: "Famille (pays origine)", label: "Domicile familial" },
+      { id: 2, age_debut: 18, age_fin: 19, statut: "Hébergé·e (tiers)", label: "Chez copine du père" }
+    ],
+    administrative: [
+      { id: 1, age_debut: 0, age_fin: 18, statut: "Hors territoire", label: "" },
+      { id: 2, age_debut: 18, age_fin: 19, statut: "Demandeur·euse d'asile", label: "2 refus OFPRA + recours" }
+    ],
+    relationnelle: [
+      { id: 1, age_debut: 0, age_fin: 18, statut: "Famille (pays origine)", label: "Famille présente" },
+      { id: 2, age_debut: 18, age_fin: 19, statut: "Famille séparée", label: "Père à Rennes" }
+    ]
+  },
+  evenements: [{ id: 1, age: 18, label: "Arrivée en France", type: "Migration / Départ" }],
+  phases: [
+    { id: 1, age_debut: 0, age_fin: 14, label: "Angola" },
+    { id: 2, age_debut: 18, age_fin: 19, label: "France — Rennes" }
+  ]
+};
+
+// ─── Utilitaires ──────────────────────────────────────────────────────────────
+
+let _id = 200;
+const nid = () => ++_id;
+const blank = () => ({
+  name: "Nouvel·le enquêté·e", pays_origine: "", age_depart: 18,
+  age_entretien: 25, ville: "Rennes",
+  trajectoires: Object.fromEntries(TRAJ_TYPES.map(t => [t, []])),
+  evenements: [], phases: []
+});
+
+// ─── Styles partagés ──────────────────────────────────────────────────────────
+
+const IS = {
+  padding: "4px 7px", borderRadius: 5, border: "1px solid #D1D5DB",
+  fontSize: 11, width: "100%", background: "white", color: "#1F2937"
+};
+const LS = { display: "block", fontSize: 10, color: "#6B7280", marginBottom: 3 };
+const CARD = {
+  border: "1px solid #E5E7EB", borderRadius: 8,
+  padding: "10px 11px", marginBottom: 9, background: "#F9FAFB"
+};
+
+// ─── Application principale ───────────────────────────────────────────────────
+
+function App() {
+  const [subjects, setSubjects] = useState([blank()]);
+  const [cur, setCur] = useState(0);
+  const [tab, setTab] = useState("general");
+  const svgRef = useRef(null);
+
+  const s = subjects[cur] || blank();
+
+  const upd = (f, v) =>
+    setSubjects(p => p.map((x, i) => i === cur ? { ...x, [f]: v } : x));
+
+  const updT = (traj, segs) =>
+    upd("trajectoires", { ...s.trajectoires, [traj]: segs });
+
+  const addSubject = () => {
+    setSubjects(p => [...p, blank()]);
+    setCur(subjects.length);
+    setTab("general");
+  };
+  const rmSubject = (i) => {
+    if (subjects.length < 2) return;
+    const n = subjects.filter((_, j) => j !== i);
+    setSubjects(n);
+    setCur(Math.min(cur, n.length - 1));
+  };
+
+  const addSeg = (t) => updT(t, [
+    ...(s.trajectoires[t] || []),
+    { id: nid(), age_debut: 0, age_fin: s.age_entretien || 25, statut: STATUTS[t][0], label: "" }
+  ]);
+  const updSeg = (t, id, f, v) => updT(t, s.trajectoires[t].map(x => x.id === id ? { ...x, [f]: v } : x));
+  const delSeg = (t, id) => updT(t, s.trajectoires[t].filter(x => x.id !== id));
+
+  const addEvt = () => upd("evenements", [
+    ...(s.evenements || []),
+    { id: nid(), age: s.age_depart || 0, label: "Événement", type: "Moment clé" }
+  ]);
+  const updEvt = (id, f, v) => upd("evenements", s.evenements.map(x => x.id === id ? { ...x, [f]: v } : x));
+  const delEvt = (id) => upd("evenements", s.evenements.filter(x => x.id !== id));
+
+  const addPhase = () => upd("phases", [
+    ...(s.phases || []),
+    { id: nid(), age_debut: 0, age_fin: s.age_entretien || 25, label: "Nouvelle phase" }
+  ]);
+  const updPhase = (id, f, v) => upd("phases", s.phases.map(x => x.id === id ? { ...x, [f]: v } : x));
+  const delPhase = (id) => upd("phases", s.phases.filter(x => x.id !== id));
+
+  // Export SVG
+  const exportSVG = () => {
+    if (!svgRef.current) return;
+    const str = new XMLSerializer().serializeToString(svgRef.current);
+    const blob = new Blob([str], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(s.name || "enquete").replace(/[\s·\/]+/g, "_")}_trajectoire.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Export PNG (via canvas)
+  const exportPNG = () => {
+    if (!svgRef.current) return;
+    const str = new XMLSerializer().serializeToString(svgRef.current);
+    const blob = new Blob([str], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = SVG_W * 2; canvas.height = SVG_H * 2;
+      const ctx = canvas.getContext("2d");
+      ctx.scale(2, 2);
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, SVG_W, SVG_H);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      const link = document.createElement("a");
+      link.download = `${(s.name || "enquete").replace(/[\s·\/]+/g, "_")}_trajectoire.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    };
+    img.src = url;
+  };
+
+  // Sauvegarde / chargement JSON
+  const saveJSON = () => {
+    const blob = new Blob([JSON.stringify(subjects, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "parcours_biographiques.json"; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const loadJSON = (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = ev => {
+      try { const d = JSON.parse(ev.target.result); setSubjects(d); setCur(0); }
+      catch { alert("Fichier JSON invalide."); }
+    };
+    r.readAsText(f); e.target.value = "";
+  };
+
+  const xBtn = (onClick) => h("button", {
+    onClick,
+    style: { background: "none", border: "none", cursor: "pointer", color: "#EF4444", fontSize: 15, lineHeight: 1, padding: 0, flexShrink: 0 }
+  }, "×");
+
+  const TABS = [
+    ["general", "Général"],
+    ...TRAJ_TYPES.map(t => [t, TRAJ_SHORT[t]]),
+    ["evenements", "Évén."],
+    ["phases", "Phases"]
+  ];
+
+  return h("div", { style: { display: "flex", height: "100vh", overflow: "hidden" } },
+
+    // ── SIDEBAR ──────────────────────────────────────────────────────────────
+    h("div", { style: { width: 178, borderRight: "1px solid #E5E7EB", background: "#F9FAFB", padding: "12px 10px", display: "flex", flexDirection: "column", overflowY: "auto", flexShrink: 0 } },
+      h("div", { style: { fontSize: 10, fontWeight: 500, color: "#6B7280", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em" } },
+        `Enquêté·es (${subjects.length})`
+      ),
+      ...subjects.map((sub, i) =>
+        h("div", {
+          key: i, onClick: () => { setCur(i); setTab("general"); },
+          style: { padding: "6px 7px", marginBottom: 2, borderRadius: 6, cursor: "pointer", background: i === cur ? "#DBEAFE" : "transparent", color: i === cur ? "#1D4ED8" : "#374151", fontSize: 11, fontWeight: i === cur ? 500 : 400, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }
+        },
+          h("div", null,
+            h("div", null, sub.name || "—"),
+            (sub.age_entretien || sub.ville) && h("div", { style: { fontSize: 10, color: i === cur ? "#3B82F6" : "#9CA3AF" } },
+              [sub.age_entretien && `${sub.age_entretien}a`, sub.ville].filter(Boolean).join(" · ")
+            )
+          ),
+          subjects.length > 1 && h("span", {
+            onClick: e => { e.stopPropagation(); rmSubject(i); },
+            style: { color: "#9CA3AF", cursor: "pointer", fontSize: 14, marginLeft: 4 }
+          }, "×")
+        )
+      ),
+      h("button", {
+        onClick: addSubject,
+        style: { marginTop: 8, padding: "6px 8px", borderRadius: 6, border: "1px dashed #9CA3AF", background: "transparent", cursor: "pointer", fontSize: 11, color: "#6B7280", textAlign: "left" }
+      }, "+ Ajouter"),
+
+      h("div", { style: { marginTop: "auto", paddingTop: 14, borderTop: "1px solid #E5E7EB", display: "flex", flexDirection: "column", gap: 6 } },
+        h("button", {
+          onClick: saveJSON,
+          style: { padding: "5px 8px", borderRadius: 5, border: "1px solid #D1D5DB", background: "white", cursor: "pointer", fontSize: 10, color: "#374151", textAlign: "left" }
+        }, "💾 Sauvegarder JSON"),
+        h("label", { style: { display: "block", padding: "5px 8px", borderRadius: 5, border: "1px solid #D1D5DB", background: "white", cursor: "pointer", fontSize: 10, color: "#374151" } },
+          "📂 Charger JSON",
+          h("input", { type: "file", accept: ".json", onChange: loadJSON, style: { display: "none" } })
+        )
+      )
+    ),
+
+    // ── FORMULAIRE ───────────────────────────────────────────────────────────
+    h("div", { style: { width: 310, borderRight: "1px solid #E5E7EB", overflowY: "auto", padding: "13px 13px", flexShrink: 0, background: "white" } },
+
+      // Onglets
+      h("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 14 } },
+        ...TABS.map(([t, l]) => h("button", {
+          key: t, onClick: () => setTab(t),
+          style: { padding: "4px 8px", borderRadius: 5, border: "none", cursor: "pointer", background: tab === t ? "#1D4ED8" : "#F3F4F6", color: tab === t ? "white" : "#4B5563", fontSize: 10, fontWeight: tab === t ? 500 : 400 }
+        }, l))
+      ),
+
+      // Général
+      tab === "general" && h("div", { style: { display: "flex", flexDirection: "column", gap: 11 } },
+        ...[["name","Prénom / Code"],["pays_origine","Pays d'origine"],["ville","Ville (Rennes / Cork)"]].map(([f, l]) =>
+          h("div", { key: f },
+            h("label", { style: LS }, l),
+            h("input", { style: IS, value: s[f] || "", onChange: e => upd(f, e.target.value) })
+          )
+        ),
+        h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 } },
+          h("div", null, h("label", { style: LS }, "Âge départ pays origine"), h("input", { style: IS, type: "number", min: 0, max: 50, value: s.age_depart ?? "", onChange: e => upd("age_depart", +e.target.value) })),
+          h("div", null, h("label", { style: LS }, "Âge à l'entretien"), h("input", { style: IS, type: "number", min: 0, max: 55, value: s.age_entretien ?? "", onChange: e => upd("age_entretien", +e.target.value) }))
+        ),
+        h("div", { style: { padding: "9px 11px", background: "#EFF6FF", borderRadius: 6, fontSize: 11, color: "#1D4ED8", lineHeight: 1.5 } },
+          "Navigue dans les onglets pour saisir les segments de chaque trajectoire."
+        )
+      ),
+
+      // Trajectoires
+      TRAJ_TYPES.includes(tab) && h("div", null,
+        h("div", { style: { fontWeight: 500, marginBottom: 9, fontSize: 12, color: "#111827" } }, TRAJ_FULL[tab]),
+        (s.trajectoires[tab] || []).length === 0 && h("div", { style: { fontSize: 11, color: "#9CA3AF", marginBottom: 12 } }, "Aucun segment."),
+        ...(s.trajectoires[tab] || []).map((seg, si) =>
+          h("div", { key: seg.id, style: CARD },
+            h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 } },
+              h("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                h("span", { style: { width: 10, height: 10, borderRadius: 2, background: COULEURS[tab]?.[seg.statut] || "#CBD5E1", flexShrink: 0, display: "inline-block" } }),
+                h("span", { style: { fontSize: 10, color: "#6B7280" } }, `Segment ${si + 1}`)
+              ),
+              xBtn(() => delSeg(tab, seg.id))
+            ),
+            h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 5 } },
+              h("div", null, h("label", { style: LS }, "De (âge)"), h("input", { type: "number", min: 0, value: seg.age_debut, onChange: e => updSeg(tab, seg.id, "age_debut", +e.target.value), style: IS })),
+              h("div", null, h("label", { style: LS }, "À (âge)"), h("input", { type: "number", min: 0, value: seg.age_fin, onChange: e => updSeg(tab, seg.id, "age_fin", +e.target.value), style: IS }))
+            ),
+            h("div", { style: { marginBottom: 5 } },
+              h("label", { style: LS }, "Statut"),
+              h("select", { value: seg.statut, onChange: e => updSeg(tab, seg.id, "statut", e.target.value), style: IS },
+                ...STATUTS[tab].map(st => h("option", { key: st }, st))
+              )
+            ),
+            h("div", null,
+              h("label", { style: LS }, "Étiquette affichée"),
+              h("input", { placeholder: "ex. École Angola, CADA Rennes…", value: seg.label, onChange: e => updSeg(tab, seg.id, "label", e.target.value), style: IS })
+            )
+          )
+        ),
+        h("button", {
+          onClick: () => addSeg(tab),
+          style: { width: "100%", padding: "7px", borderRadius: 6, border: "1px dashed #9CA3AF", background: "transparent", cursor: "pointer", fontSize: 11, color: "#6B7280" }
+        }, "+ Ajouter un segment")
+      ),
+
+      // Événements
+      tab === "evenements" && h("div", null,
+        h("div", { style: { fontWeight: 500, marginBottom: 9, fontSize: 12 } }, "Événements clés"),
+        ...(s.evenements || []).map((evt, ei) =>
+          h("div", { key: evt.id, style: CARD },
+            h("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 7 } },
+              h("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                h("span", { style: { width: 10, height: 10, borderRadius: 2, background: COULEURS_EVT[evt.type] || "#374151", flexShrink: 0, display: "inline-block" } }),
+                h("span", { style: { fontSize: 10, color: "#6B7280" } }, `Événement ${ei + 1}`)
+              ),
+              xBtn(() => delEvt(evt.id))
+            ),
+            h("div", { style: { display: "grid", gridTemplateColumns: "65px 1fr", gap: 5, marginBottom: 5 } },
+              h("div", null, h("label", { style: LS }, "Âge"), h("input", { type: "number", min: 0, value: evt.age, onChange: e => updEvt(evt.id, "age", +e.target.value), style: IS })),
+              h("div", null, h("label", { style: LS }, "Libellé"), h("input", { value: evt.label, onChange: e => updEvt(evt.id, "label", e.target.value), style: IS }))
+            ),
+            h("div", null,
+              h("label", { style: LS }, "Type"),
+              h("select", { value: evt.type, onChange: e => updEvt(evt.id, "type", e.target.value), style: IS },
+                ...TYPES_EVT.map(t => h("option", { key: t }, t))
+              )
+            )
+          )
+        ),
+        h("button", {
+          onClick: addEvt,
+          style: { width: "100%", padding: "7px", borderRadius: 6, border: "1px dashed #9CA3AF", background: "transparent", cursor: "pointer", fontSize: 11, color: "#6B7280" }
+        }, "+ Ajouter un événement")
+      ),
+
+      // Phases
+      tab === "phases" && h("div", null,
+        h("div", { style: { fontWeight: 500, marginBottom: 6, fontSize: 12 } }, "Phases biographiques"),
+        h("div", { style: { fontSize: 11, color: "#6B7280", marginBottom: 11, lineHeight: 1.5 } },
+          "Apparaissent en italique entre « » au-dessus de la flèche."
+        ),
+        ...(s.phases || []).map((p, pi) =>
+          h("div", { key: p.id, style: CARD },
+            h("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 7 } },
+              h("span", { style: { fontSize: 10, color: "#6B7280" } }, `Phase ${pi + 1}`),
+              xBtn(() => delPhase(p.id))
+            ),
+            h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 5 } },
+              h("div", null, h("label", { style: LS }, "Âge début"), h("input", { type: "number", value: p.age_debut, onChange: e => updPhase(p.id, "age_debut", +e.target.value), style: IS })),
+              h("div", null, h("label", { style: LS }, "Âge fin"), h("input", { type: "number", value: p.age_fin, onChange: e => updPhase(p.id, "age_fin", +e.target.value), style: IS }))
+            ),
+            h("div", null,
+              h("label", { style: LS }, "Label"),
+              h("input", { value: p.label, onChange: e => updPhase(p.id, "label", e.target.value), placeholder: "ex. Angola · Enfance", style: IS })
+            )
+          )
+        ),
+        h("button", {
+          onClick: addPhase,
+          style: { width: "100%", padding: "7px", borderRadius: 6, border: "1px dashed #9CA3AF", background: "transparent", cursor: "pointer", fontSize: 11, color: "#6B7280" }
+        }, "+ Ajouter une phase")
+      )
+    ),
+
+    // ── VISUALISATION ─────────────────────────────────────────────────────────
+    h("div", { style: { flex: 1, overflowY: "auto", padding: 18, minWidth: 0, background: "#F9FAFB" } },
+      h("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 13, flexWrap: "wrap" } },
+        h("button", {
+          onClick: exportSVG,
+          style: { padding: "7px 15px", borderRadius: 6, background: "#1D4ED8", color: "white", border: "none", cursor: "pointer", fontWeight: 500, fontSize: 12 }
+        }, "Exporter SVG ↓"),
+        h("button", {
+          onClick: exportPNG,
+          style: { padding: "7px 15px", borderRadius: 6, background: "#059669", color: "white", border: "none", cursor: "pointer", fontWeight: 500, fontSize: 12 }
+        }, "Exporter PNG ↓"),
+        h("span", { style: { fontSize: 11, color: "#6B7280" } }, "SVG = éditable dans Inkscape/Illustrator. PNG = directement utilisable.")
+      ),
+
+      h("div", { style: { overflowX: "auto", background: "white", border: "1px solid #E5E7EB", borderRadius: 8, padding: 10, marginBottom: 18, boxShadow: "0 1px 3px rgba(0,0,0,0.05)" } },
+        h(VizSVG, { subject: s, svgRef })
+      ),
+
+      h("details", null,
+        h("summary", { style: { fontSize: 12, fontWeight: 500, color: "#6B7280", userSelect: "none", marginBottom: 10 } }, "Légende complète ▸"),
+        h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 10, background: "white", border: "1px solid #E5E7EB", borderRadius: 8, padding: 14 } },
+          ...TRAJ_TYPES.map(traj =>
+            h("div", { key: traj },
+              h("div", { style: { fontWeight: 500, fontSize: 11, marginBottom: 5, color: "#111827" } }, TRAJ_FULL[traj]),
+              ...Object.entries(COULEURS[traj]).map(([st, col]) =>
+                h("div", { key: st, style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 4 } },
+                  h("span", { style: { width: 12, height: 12, borderRadius: 2, background: col, flexShrink: 0 } }),
+                  h("span", { style: { fontSize: 10, color: "#6B7280" } }, st)
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>
